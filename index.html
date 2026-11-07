@@ -122,7 +122,7 @@
     });
 
     document.getElementById('summary').innerHTML =
-      '<span><strong>' + people.toLocaleString() + '</strong> Living Landscapes</span>' +
+      '<span><strong>' + (data.total != null ? data.total : people).toLocaleString() + '</strong> Living Landscapes</span>' +
       '<span>in <strong>' + mappedZips.size.toLocaleString() + '</strong> Florida zip codes</span>' +
       '<span class="muted">Pins mark the center of each zip code, not individual homes.</span>';
   }).catch(err => {
