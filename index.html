@@ -20,6 +20,8 @@
   .pin.group, .pin.group svg { width: 38px; height: 50px; }
   .pin.group span { width: 38px; top: 9px; font-size: 13px; }
   .leaflet-popup-content { font-size: 14px; margin: 10px 14px; }
+  .legend { background: rgba(255,255,255,.92); padding: 6px 10px; border-radius: 6px; box-shadow: 0 1px 4px rgba(0,0,0,.25); font-size: 13px; line-height: 20px; }
+  .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 50%; margin-right: 6px; vertical-align: -1px; border: 1px solid #fff; box-shadow: 0 0 0 1px rgba(0,0,0,.2); }
 </style>
 </head>
 <body>
@@ -45,46 +47,83 @@
   map.on('click', () => map.scrollWheelZoom.enable());
   map.on('mouseout', () => map.scrollWheelZoom.disable());
 
-  // A single zip is a green pin; a group of nearby zips is a larger, darker pin with the combined total.
-  function pinIcon(count, group) {
+  // Pin colors by certification type. "group" is the darker shade used when nearby pins merge.
+  const TYPES = [
+    { key: 'Residential', label: 'Residential', fill: '#2f6b3a', group: '#1f4a27', text: '#fff' },
+    { key: 'Restoration', label: 'Restoration', fill: '#E0A800', group: '#B38600', text: '#2b2100' },
+    { key: 'Champion',    label: 'Champion',    fill: '#1F5FA8', group: '#16457A', text: '#fff' }
+  ];
+
+  // offsetX nudges a pin sideways so different types in the same zip sit side by side.
+  function pinIcon(type, count, group, offsetX) {
     const w = group ? 38 : 30, h = group ? 50 : 40;
     const label = count > 999 ? '999+' : count;
     return L.divIcon({
       className: '',
-      iconSize: [w, h], iconAnchor: [w / 2, h], popupAnchor: [0, -h + 4],
-      html: '<div class="pin' + (group ? ' group' : '') + '"><svg viewBox="0 0 30 40"><path fill="' + (group ? '#1f4a27' : '#2f6b3a') + '" stroke="#fff" stroke-width="2" d="M15 1C7.3 1 1 7.2 1 14.8 1 25 15 39 15 39s14-14 14-24.2C29 7.2 22.7 1 15 1z"/></svg>'
-        + '<span>' + label + '</span></div>'
+      iconSize: [w, h], iconAnchor: [w / 2 - (offsetX || 0), h], popupAnchor: [offsetX || 0, -h + 4],
+      html: '<div class="pin' + (group ? ' group' : '') + '"><svg viewBox="0 0 30 40"><path fill="' + (group ? type.group : type.fill) + '" stroke="#fff" stroke-width="2" d="M15 1C7.3 1 1 7.2 1 14.8 1 25 15 39 15 39s14-14 14-24.2C29 7.2 22.7 1 15 1z"/></svg>'
+        + '<span style="color:' + type.text + '">' + label + '</span></div>'
     });
   }
 
-  // Zoomed out, nearby pins merge into one; zooming in (or clicking a group) splits them apart.
-  const groups = L.markerClusterGroup({
-    maxClusterRadius: 60,
-    showCoverageOnHover: false,
-    spiderfyOnMaxZoom: true,
-    iconCreateFunction: cluster => {
-      const total = cluster.getAllChildMarkers().reduce((sum, m) => sum + m.options.count, 0);
-      return pinIcon(total, true);
-    }
-  }).addTo(map);
+  // One grouping layer per type: zoomed out, nearby pins of the SAME type merge into one;
+  // zooming in (or clicking a group) splits them apart.
+  // Each type gets its own layer, stacked so Restoration and Champion pins sit on top of Residential.
+  const layers = {};
+  TYPES.forEach((type, i) => {
+    map.createPane('pins-' + type.key).style.zIndex = 600 + i * 10;
+    layers[type.key] = L.markerClusterGroup({
+      clusterPane: 'pins-' + type.key,
+      maxClusterRadius: 60,
+      showCoverageOnHover: false,
+      spiderfyOnMaxZoom: true,
+      iconCreateFunction: cluster => {
+        const total = cluster.getAllChildMarkers().reduce((sum, m) => sum + m.options.count, 0);
+        return pinIcon(type, total, true, (i - 1) * 22); // groups sit side by side: green left, yellow middle, blue right
+      }
+    }).addTo(map);
+  });
+
+  // Color key in the bottom-left corner.
+  const legend = L.control({ position: 'bottomleft' });
+  legend.onAdd = () => {
+    const div = L.DomUtil.create('div', 'legend');
+    div.innerHTML = TYPES.map(t => '<div><i style="background:' + t.fill + '"></i>' + t.label + '</div>').join('');
+    return div;
+  };
+  legend.addTo(map);
 
   const esc = s => String(s).replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 
   fetch(DATA_URL).then(r => r.json()).then(data => {
     const places = data.places || {};
-    let pins = 0, people = 0;
-    Object.entries(data.zips || {}).forEach(([zip, count]) => {
-      const p = places[zip];
-      if (!p) return; // not a Florida zip
-      pins++; people += count;
-      const label = count === 1 ? '1 Living Landscape' : count + ' Living Landscapes';
-      L.marker([p[0], p[1]], { icon: pinIcon(count), count: count, title: zip + ': ' + label, alt: label })
-        .bindPopup('<strong>' + label + '</strong><br>' + esc(p[2]) + ', FL ' + esc(zip))
-        .addTo(groups);
+    const byType = data.byType || { Residential: data.zips || {} };
+    const mappedZips = new Set();
+    let people = 0;
+
+    // Which types appear in each zip, so shared zips can be spread out.
+    const typesInZip = {};
+    TYPES.forEach(t => Object.keys(byType[t.key] || {}).forEach(zip => {
+      (typesInZip[zip] = typesInZip[zip] || []).push(t.key);
+    }));
+
+    TYPES.forEach(type => {
+      Object.entries(byType[type.key] || {}).forEach(([zip, count]) => {
+        const p = places[zip];
+        if (!p) return; // not a Florida zip
+        mappedZips.add(zip); people += count;
+        const here = typesInZip[zip];
+        const offsetX = (here.indexOf(type.key) - (here.length - 1) / 2) * 24;
+        const label = count + ' ' + type.label + ' Living Landscape' + (count === 1 ? '' : 's');
+        L.marker([p[0], p[1]], { icon: pinIcon(type, count, false, offsetX), pane: 'pins-' + type.key, count: count, title: zip + ': ' + label, alt: label })
+          .bindPopup('<strong>' + label + '</strong><br>' + esc(p[2]) + ', FL ' + esc(zip))
+          .addTo(layers[type.key]);
+      });
     });
+
     document.getElementById('summary').innerHTML =
       '<span><strong>' + people.toLocaleString() + '</strong> Living Landscapes</span>' +
-      '<span>in <strong>' + pins.toLocaleString() + '</strong> Florida zip codes</span>' +
+      '<span>in <strong>' + mappedZips.size.toLocaleString() + '</strong> Florida zip codes</span>' +
       '<span class="muted">Pins mark the center of each zip code, not individual homes.</span>';
   }).catch(err => {
     console.error(err);
